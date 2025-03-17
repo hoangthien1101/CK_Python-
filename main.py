@@ -1,5 +1,6 @@
 import cv2
 import torch
+import time
 from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
@@ -15,27 +16,12 @@ CONF_THRESHOLD = 0.4
 yolo_model = YOLO(YOLO_MODEL_PATH).to(DEVICE)
 tracker = DeepSort(max_age=10, n_init=3, nn_budget=10)
 
-
-# ============================== Hàm chuyển đổi tọa độ ==============================
+# ============================== Chuyển đổi tọa độ ==============================
 def convert_to_custom_coordinates(center_x, center_y, frame_width, frame_height):
-    """
-    Chuyển đổi tọa độ tâm (center_x, center_y) từ hệ pixel sang hệ tọa độ -1000 đến 1000,
-    với tâm khung hình là (0, 0).
-    """
-    # Dịch chuyển gốc tọa độ về trung tâm
-    x_shifted = center_x - (frame_width / 2)
-    y_shifted = center_y - (frame_height / 2)
-
-    # Tính giá trị co giãn tối đa
-    max_shift_x = frame_width / 2
-    max_shift_y = frame_height / 2
-
-    # Co giãn tọa độ về phạm vi -1000 đến 1000
-    x_new = (x_shifted / max_shift_x) * 1000
-    y_new = (y_shifted / max_shift_y) * 1000
-
+    """ Chuyển tọa độ tâm từ hệ pixel sang hệ -1000 đến 1000 với tâm ảnh là (0, 0). """
+    x_new = ((center_x - frame_width / 2) / (frame_width / 2)) * 1000
+    y_new = ((center_y - frame_height / 2) / (frame_height / 2)) * 1000
     return x_new, y_new
-
 
 # ============================== Xử lý frame ==============================
 def process_frame(frame, track_history):
@@ -67,46 +53,33 @@ def process_frame(frame, track_history):
             if area > max_area:
                 max_area = area
                 track_id = track.track_id
-                center_x = (x1 + x2) // 2
-                center_y = (y1 + y2) // 2
+                center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
 
                 # Cập nhật lịch sử vị trí
                 track_history[track_id] = track_history.get(track_id, [])[-19:] + [(center_x, center_y)]
 
                 # Tính vector chuyển động
-                dx, dy = 0, 0
-                if len(track_history[track_id]) >= 2:
-                    prev = track_history[track_id][-2]
-                    dx = center_x - prev[0]
-                    dy = center_y - prev[1]
+                dx, dy = (center_x - track_history[track_id][-2][0], center_y - track_history[track_id][-2][1]) if len(track_history[track_id]) >= 2 else (0, 0)
 
-                # Chuyển đổi tọa độ tâm về hệ -1000 đến 1000
-                custom_x, custom_y = convert_to_custom_coordinates(
-                    center_x, center_y, FRAME_SIZE[0], FRAME_SIZE[1]
-                )
+                # Chuyển đổi tọa độ
+                custom_x, custom_y = convert_to_custom_coordinates(center_x, center_y, FRAME_SIZE[0], FRAME_SIZE[1])
 
                 target_info = {
                     'track_id': track_id,
-                    'x1': x1,
-                    'y1': y1,
-                    'x2': x2,
-                    'y2': y2,
-                    'center_x': center_x,
-                    'center_y': center_y,
-                    'custom_x': custom_x,
-                    'custom_y': custom_y,
-                    'frame_width': FRAME_SIZE[0],
-                    'frame_height': FRAME_SIZE[1],
-                    'bbox_area': area,
-                    'movement_vector': (dx, dy)
+                    'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                    'center_x': center_x, 'center_y': center_y,
+                    'custom_x': custom_x, 'custom_y': custom_y,
+                    'bbox_area': area, 'movement_vector': (dx, dy)
                 }
 
     return frame, target_info
 
-
 # ============================== Vòng lặp chính ==============================
 track_history = {}
 cap = cv2.VideoCapture(VIDEO_PATH)
+
+fps_start_time = time.time()
+frame_count = 0
 
 try:
     while True:
@@ -116,59 +89,43 @@ try:
 
         processed_frame, target_info = process_frame(frame, track_history)
 
-        # In các giá trị cần thiết để tính toán direction và speed
+        # Tính FPS
+        frame_count += 1
+        elapsed_time = time.time() - fps_start_time
+        fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+
+        # In thông tin và FPS
         if target_info:
             print("\n" + "=" * 60)
             print(f"⚡ THÔNG TIN BÓNG ⚡")
-            print(f"- ID bóng: {target_info['track_id']}")
-            print(f"- Tọa độ tâm (pixel): ({target_info['center_x']}, {target_info['center_y']})")
-            print(f"- Tọa độ tâm (custom): ({target_info['custom_x']:.2f}, {target_info['custom_y']:.2f})")
-            print(
-                f"- Vector chuyển động: DX = {target_info['movement_vector'][0]: .1f}, DY = {target_info['movement_vector'][1]: .1f}")
-            print(f"- Kích thước bóng: {target_info['bbox_area']}px²")
+            print(f"- ID: {target_info['track_id']}")
+            print(f"- Tọa độ (pixel): ({target_info['center_x']}, {target_info['center_y']})")
+            print(f"- Tọa độ (custom): ({target_info['custom_x']:.2f}, {target_info['custom_y']:.2f})")
+            print(f"- Vector chuyển động: DX = {target_info['movement_vector'][0]: .1f}, DY = {target_info['movement_vector'][1]: .1f}")
+            print(f"- Kích thước: {target_info['bbox_area']}px²")
+            print(f"- 🔥 FPS: {fps:.2f}")
             print("=" * 60)
 
-            # Hiển thị hình ảnh
             # Vẽ bounding box
-            cv2.rectangle(processed_frame,
-                          (target_info['x1'], target_info['y1']),
-                          (target_info['x2'], target_info['y2']),
-                          (0, 255, 0), 2)
+            cv2.rectangle(processed_frame, (target_info['x1'], target_info['y1']),
+                          (target_info['x2'], target_info['y2']), (0, 255, 0), 2)
 
             # Vẽ tâm và hướng di chuyển
-            cv2.circle(processed_frame,
-                       (target_info['center_x'], target_info['center_y']),
-                       5, (0, 0, 255), -1)
+            cv2.circle(processed_frame, (target_info['center_x'], target_info['center_y']), 5, (0, 0, 255), -1)
 
-            # # Vẽ vector chuyển động
-            dx, dy = target_info['movement_vector']
-            # cv2.arrowedLine(processed_frame,
-            #                 (target_info['center_x'], target_info['center_y']),
-            #                 (int(target_info['center_x'] + dx * 5),
-            #                  int(target_info['center_y'] + dy * 5)),
-            #                 (255, 0, 0), 2, tipLength=0.3)
-
-            # Vẽ lộ trình
+            # Vẽ lịch sử di chuyển
             history = track_history.get(target_info['track_id'], [])
             for i in range(1, len(history)):
-                cv2.line(processed_frame, history[i - 1], history[i],
-                         (0, 255, 255), 2)
+                cv2.line(processed_frame, history[i - 1], history[i], (0, 255, 255), 2)
 
-            # Hiển thị thông số
-            cv2.putText(processed_frame,
-                        f"Center (custom): ({target_info['custom_x']:.2f}, {target_info['custom_y']:.2f})", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(processed_frame,
-                        f"Movement: DX={dx:.1f}, DY={dy:.1f}", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(processed_frame,
-                        f"Area: {target_info['bbox_area']}px²", (10, 90),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        # Hiển thị FPS trên màn hình
+        cv2.putText(processed_frame, f"FPS: {fps:.2f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            cv2.imshow("Robot Controller", processed_frame)
+        cv2.imshow("Robot Controller", processed_frame)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
 finally:
     cap.release()
